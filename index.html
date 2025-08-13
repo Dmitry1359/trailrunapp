@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>GPX → Профиль (ожидаемый) → Отправить</title>
+<style>
+  :root{--bg:#000;--card:#18181b;--border:#27272a;--muted:#a1a1aa;--ink:#fff;--accent:#fff}
+  body{background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;margin:0}
+  *,*::before,*::after{box-sizing:border-box}
+  .wrap{max-width:1000px;margin:24px auto;padding:0 16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:16px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .cell{flex:1;min-width:220px}
+  .muted{color:var(--muted);font-size:12px}
+  .btn{border-radius:12px;border:1px solid #3f3f46;background:var(--accent);color:#000;padding:10px 16px;font-weight:600;cursor:pointer;display:inline-block;line-height:1.2}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .pill{padding:8px 12px;border-radius:10px;border:1px solid #3f3f46;background:#111;color:#fff;cursor:pointer;font-weight:600;line-height:1.2}
+  .pill.active{background:#fff;color:#000;border-color:#fff;font-weight:600}
+  .kpi{font-size:24px;font-weight:700;margin-top:4px}
+  svg{width:100%;height:280px;display:block}
+  input[type=number],input[type=text]{background:#000;border:1px solid #3f3f46;color:#fff;border-radius:10px;padding:10px 12px;width:100%;max-width:100%;font:inherit;line-height:1.2;box-sizing:border-box}
+  input[type=file]{color:#fff}
+  .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+  @media (max-width:820px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .warn{color:#fbbf24;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Импорт GPX → Профиль (ожидаемый) → Отправить на устройство</h1>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:6px">Загрузите GPX-файл</div>
+    <label class="btn" id="fileBtn" style="margin-top:4px">Выберите файл<input id="file" type="file" accept=".gpx" style="display:none"/></label>
+    <div id="fname" class="muted" style="margin-top:8px"></div>
+  </div>
+
+  <div class="row">
+    <div class="card cell">
+      <div class="muted">Метод расчёта</div>
+      <div class="row" id="modes" style="margin-top:6px">
+        <button class="pill" data-mode="our">Trail</button>
+        <button class="pill active" data-mode="tdt">Trace de Trail</button>
+      </div>
+      <div class="muted" style="margin-top:6px">Trail: окно ~50 м, T=10 м, H=2 м. TDT: амплитудный порог 3/10 м, H=1 м.</div>
+    </div>
+    <div class="card cell" id="tdtBlock">
+      <div class="muted">Порог TDT (амплитуда), м</div>
+      <div class="row" id="tdtThr" style="margin-top:6px">
+        <button class="pill" data-v="3">3</button>
+        <button class="pill active" data-v="10">10</button>
+      </div>
+      <div class="muted" style="margin-top:6px">3 м — барометрические треки; 10 м — без баро/DEM.</div>
+    </div>
+    <div class="card cell">
+      <div class="muted">ID устройства (для доставки)</div>
+      <input id="device" type="text" placeholder="например, pixel7pro-001" style="width:100%;margin-top:6px"/>
+      <div class="muted" style="margin-top:6px">Можно оставить пустым — манифест можно скачать вручную.</div>
+      <div class="muted" style="margin-top:14px">Буфер офлайн‑карт (км)</div>
+      <input id="buffer" type="number" min="1" max="15" value="5" style="width:80px;margin-top:6px"/>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="muted">Дистанция</div><div id="dist" class="kpi">0.00 км</div></div>
+    <div class="card"><div class="muted">Ожидаемый набор</div><div id="gain" class="kpi">0 м</div></div>
+    <div class="card"><div class="muted">Ожидаемый спуск</div><div id="loss" class="kpi">0 м</div></div>
+    <div class="card"><div class="muted">Точек трека</div><div id="points" class="kpi">0</div></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div class="muted">Профиль высот (ожидаемый)</div>
+      <div id="warn" class="warn" style="display:none">В GPX нет &lt;ele&gt;. Для профиля нужен DEM (сервер).</div>
+    </div>
+    <div id="chart"></div>
+  </div>
+
+  <div class="row">
+    <button id="send" class="btn" disabled>Отправить на устройство</button>
+    <a id="dl" class="btn" style="display:none" download>Скачать манифест (JSON)</a>
+  </div>
+
+  <p class="muted" style="margin-top:10px">Памятка: на устройстве фактический набор считается по барометру (порог 5 м); на вебе — только ожидаемый.</p>
+</div>
+
+<script>
+// ----- Геометрия -----
+const toRad = (d)=>d*Math.PI/180;
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371000;
+  const dphi=toRad(lat2-lat1);
+  const dl=toRad(lon2-lon1);
+  const a=Math.sin(dphi/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dl/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function distancesOf(pts){
+  const d=[0];
+  for(let i=1;i<pts.length;i++){ d.push(d[i-1]+haversine(pts[i-1].lat,pts[i-1].lon,pts[i].lat,pts[i].lon)); }
+  return d;
+}
+// ----- Ресемплинг по длине -----
+function resampleByStep(pts, step=10){
+  if(!pts||pts.length<2) return pts?pts.slice():[];
+  const out=[]; let prev=pts[0]; let accS=0; let nextS=step;
+  out.push({...prev, s:0});
+  for(let i=1;i<pts.length;i++){
+    const a=prev, b=pts[i];
+    const seg=haversine(a.lat,a.lon,b.lat,b.lon);
+    let segStart=accS; let segEnd=accS+seg;
+    while(segEnd>=nextS){
+      const t=(nextS-segStart)/seg;
+      const lat=a.lat+(b.lat-a.lat)*t;
+      const lon=a.lon+(b.lon-a.lon)*t;
+      const ele=(a.ele!=null&&b.ele!=null)?(a.ele+(b.ele-a.ele)*t):null;
+      out.push({lat,lon,ele,s:nextS});
+      segStart=nextS; nextS+=step;
+    }
+    accS=segEnd; prev=b;
+  }
+  const last=pts[pts.length-1];
+  if(!out.length || out[out.length-1].s!==accS) out.push({lat:last.lat,lon:last.lon,ele:last.ele??null,s:accS});
+  return out;
+}
+// ----- Сглаживание -----
+function smooth(values, windowCount=5){
+  if(values.length<2||windowCount<2) return values.slice();
+  const half=Math.floor(windowCount/2);
+  return values.map((_,i)=>{
+    const s=Math.max(0,i-half), e=Math.min(values.length,i+half+1);
+    const slice=values.slice(s,e);
+    return slice.reduce((a,b)=>a+b,0)/slice.length;
+  });
+}
+// ----- Trail метод -----
+function gainLoss_Trail(eles,T=10,H=2){
+  if(!eles||eles.length<2) return {gain:0,loss:0};
+  let G=0, up=0, descending=false, cumDown=0, prev=eles[0];
+  for(let i=1;i<eles.length;i++){
+    const d=eles[i]-prev; prev=eles[i];
+    if(d>0){ if(descending){descending=false; cumDown=0;} up+=d; }
+    else if(d<0){ if(!descending){descending=true; cumDown=0;} cumDown+=-d; if(cumDown>=H){ if(up>=T) G+=up; up=0; } }
+  }
+  if(!descending && up>=T) G+=up;
+  let L=0, down=0, ascending=false, cumUp=0; prev=eles[0];
+  for(let i=1;i<eles.length;i++){
+    const d=eles[i]-prev; prev=eles[i];
+    if(d<0){ if(ascending){ascending=false; cumUp=0;} down+=-d; }
+    else if(d>0){ if(!ascending){ascending=true; cumUp=0;} cumUp+=d; if(cumUp>=H){ L+=down; down=0; } }
+  }
+  if(!ascending) L+=down;
+  return {gain:Math.round(G), loss:Math.round(L)};
+}
+// ----- Trace de Trail -----
+function gainLoss_TDT(eles,T=10,H=1){ return gainLoss_Trail(eles,T,H); } // логика идентична по формализации
+
+// ----- GPX -----
+function parseGPX(text){
+  const doc=new DOMParser().parseFromString(text,"application/xml");
+  const trkpts=doc.getElementsByTagName("trkpt");
+  const pts=[];
+  for(let i=0;i<trkpts.length;i++){
+    const el=trkpts[i];
+    const lat=parseFloat(el.getAttribute("lat")||"0");
+    const lon=parseFloat(el.getAttribute("lon")||"0");
+    const eleEl=el.getElementsByTagName("ele")[0];
+    const ele=eleEl && eleEl.textContent && !isNaN(parseFloat(eleEl.textContent)) ? parseFloat(eleEl.textContent) : null;
+    if(isFinite(lat)&&isFinite(lon)) pts.push({lat,lon,ele});
+  }
+  return pts;
+}
+function buildExpected(rawPts, step=10, windowPts=5){
+  const hasEle=rawPts.some(p=>p.ele!==null && isFinite(p.ele));
+  if(!hasEle) return {hasElevation:false,dists:[],eles:[],raw:[]};
+  const pts=resampleByStep(rawPts, step);
+  const dists=distancesOf(pts);
+  const eles=smooth(pts.map(p=>p.ele), windowPts);
+  return {hasElevation:true,dists,eles,raw:pts};
+}
+async function sha256(str){
+  const enc=new TextEncoder().encode(str);
+  const buf=await crypto.subtle.digest("SHA-256",enc);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+// ----- UI state -----
+let gpxText=""; let fileName=""; let mode="tdt"; let tdtThr=10; let bufferKm=5; let deviceId="";
+let expected={hasElevation:false,dists:[],eles:[],raw:[]};
+
+// ----- DOM -----
+const $file=document.getElementById("file");
+const $fname=document.getElementById("fname");
+const $dist=document.getElementById("dist");
+const $gain=document.getElementById("gain");
+const $loss=document.getElementById("loss");
+const $points=document.getElementById("points");
+const $warn=document.getElementById("warn");
+const $chart=document.getElementById("chart");
+const $modes=document.getElementById("modes");
+const $tdtBlock=document.getElementById("tdtBlock");
+const $tdtThr=document.getElementById("tdtThr");
+const $device=document.getElementById("device");
+const $buffer=document.getElementById("buffer");
+const $send=document.getElementById("send");
+const $dl=document.getElementById("dl");
+
+function render(){
+  const distM = expected.dists.length? expected.dists[expected.dists.length-1] : 0;
+  const gl = (expected.hasElevation && expected.eles.length>1)
+    ? (mode==="tdt" ? gainLoss_TDT(expected.eles, tdtThr, 1) : gainLoss_Trail(expected.eles, 10, 2))
+    : {gain:0, loss:0};
+  $dist.textContent = (distM/1000).toFixed(2) + " км";
+  $gain.textContent = gl.gain + " м";
+  $loss.textContent = gl.loss + " м";
+  $points.textContent = gpxText ? parseGPX(gpxText).length : 0;
+  $warn.style.display = expected.hasElevation ? "none" : "block";
+
+  // chart
+  $chart.innerHTML="";
+  if(expected.dists.length>1){
+    const data = expected.dists.map((d,i)=>({km:d/1000, ele: expected.eles[i]}));
+    const svgW=900, svgH=280, pad=34; // больше отступ под подписи
+    const xs=data.map(d=>d.km), ys=data.map(d=>d.ele);
+    const minX=Math.min(...xs);
+    const maxX=Math.max(...xs);
+    const minY=Math.min(...ys);
+    const maxY=Math.max(...ys);
+    const x=(t)=> pad+((t-minX)/(maxX-minX||1))*(svgW-2*pad);
+    const y=(v)=> svgH-pad-((v-minY)/(maxY-minY||1))*(svgH-2*pad);
+    const path = data.map((d,i)=> (i?"L ":"M ")+x(d.km)+","+y(d.ele)).join(" ");
+    const area = `${path} L ${x(maxX)},${y(minY)} L ${x(minX)},${y(minY)} Z`;
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox",`0 0 ${svgW} ${svgH}`);
+
+    // Build grid/ticks
+    const yStep = 200; // 200 м шаг
+    const yStart = Math.floor(minY / yStep) * yStep;
+    const yEnd = Math.ceil(maxY / yStep) * yStep;
+    let grid = "";
+    for(let v=yStart; v<=yEnd; v+=yStep){
+      const Y = y(v);
+      grid += `<line x1="${pad}" y1="${Y}" x2="${svgW-pad}" y2="${Y}" stroke="#27272a"/>`+
+              `<text x="${8}" y="${Y-2}" font-size="10" fill="#a1a1aa">${v}</text>`;
+    }
+    // X ticks: каждые 5 км + всегда последний (общее расстояние)
+    const xStep = 5; // км
+    const xEndBase = Math.floor(maxX / xStep) * xStep;
+    const xTicks = [];
+    for(let t = 0; t <= xEndBase; t += xStep){ xTicks.push(t); }
+    if (xTicks[xTicks.length-1] !== maxX) xTicks.push(maxX); // общий метраж
+    for (let i=0; i<xTicks.length; i++){
+      const t = xTicks[i];
+      const isLast = (t === maxX);
+      const X = x(t);
+      grid += `<line x1="${X}" y1="${pad}" x2="${X}" y2="${svgH-pad}" stroke="#27272a"/>`+
+              `<text x="${isLast? (X-2) : X}" y="${svgH-6}" font-size="10" fill="#a1a1aa" text-anchor="${isLast? "end" : "middle"}">${t.toFixed(isLast?1:0)}</text>`;
+    }
+
+    svg.innerHTML=`${grid}
+<path d="${area}" fill="#3f3f46" opacity="0.85"/>
+<path d="${path}" fill="none" stroke="#fafafa" stroke-width="1.5"/>
+<line x1="${pad}" y1="${svgH-pad}" x2="${svgW-pad}" y2="${svgH-pad}" stroke="#a1a1aa"/>
+<line x1="${pad}" y1="${pad}" x2="${pad}" y2="${svgH-pad}" stroke="#a1a1aa"/>
+<text x="${pad}" y="${svgH-6}" font-size="10" fill="#a1a1aa" text-anchor="start">км</text>
+<text x="8" y="${pad-10}" font-size="10" fill="#a1a1aa">м</text>`;
+    $chart.appendChild(svg);
+  }
+}
+
+$file.addEventListener("change", async (e)=>{
+  const f=e.target.files && e.target.files[0];
+  if(!f) return;
+  fileName=f.name; $fname.textContent="Файл: "+fileName;
+  gpxText = await f.text();
+  expected = buildExpected(parseGPX(gpxText), 10, mode==="tdt"?7:5);
+  $send.disabled = !gpxText;
+  render();
+});
+$modes.addEventListener("click",(e)=>{
+  const btn=e.target.closest("button.pill"); if(!btn) return;
+  [...$modes.querySelectorAll(".pill")].forEach(b=>b.classList.remove("active"));
+  btn.classList.add("active");
+  mode = btn.getAttribute("data-mode")||"tdt";
+  $tdtBlock.style.display = (mode==="tdt") ? "block" : "none";
+  expected = buildExpected(parseGPX(gpxText), 10, mode==="tdt"?7:5);
+  render();
+});
+$tdtThr.addEventListener("click",(e)=>{
+  const btn=e.target.closest("button.pill"); if(!btn) return;
+  [...$tdtThr.querySelectorAll(".pill")].forEach(b=>b.classList.remove("active"));
+  btn.classList.add("active");
+  tdtThr = parseInt(btn.getAttribute("data-v")||"10",10);
+  render();
+});
+$device.addEventListener("input",(e)=>{ deviceId = e.target.value||""; });
+$buffer.addEventListener("input",(e)=>{ bufferKm = parseFloat(e.target.value||"5"); });
+
+$send.addEventListener("click", async ()=>{
+  if(!gpxText) return;
+  const hash = await sha256(gpxText);
+  const routeId = "route_"+hash.substring(0,12);
+  const distM = expected.dists.length? expected.dists[expected.dists.length-1] : 0;
+  const gl = (expected.hasElevation && expected.eles.length>1)
+      ? (mode==="tdt" ? gainLoss_TDT(expected.eles, tdtThr, 1) : gainLoss_Trail(expected.eles, 10, 2))
+      : {gain:0, loss:0};
+  const manifest = {
+    version: 2,
+    route: { id: routeId, name: fileName || "GPX маршрут", length_m: Math.round(distM),
+      expected_gain_m: gl.gain, expected_loss_m: gl.loss, expected_source: expected.hasElevation? "gpx_ele":"dem", hash },
+    profile_expected: { schema: "s->h", points: expected.dists.map((d,i)=>[Math.round(d), Math.round(expected.eles[i]||0)]) },
+    tileset: { buffer_km: bufferKm, mbtiles_ref: null },
+    settings: {
+      language: "ru",
+      units: {distance:"km", elevation:"m", pace:"min_per_km"},
+      elevation_gain: { method: mode, tdt_threshold_m: tdtThr, expected_threshold_m: 10, actual_baro_threshold_m: 5, down_hysteresis_m: 2 },
+      map: { buffer_km: bufferKm, style: "minimal" }
+    },
+    delivery: { device_id: deviceId||null, queued_at: new Date().toISOString() }
+  };
+  const blob = new Blob([JSON.stringify(manifest,null,2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  $dl.href = url;
+  // формируем имя файла на основе загруженного GPX и метода расчёта
+  const base = (fileName || 'route').replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]+/g,'_');
+  const methodTag = (mode==='tdt') ? `tdt_T${tdtThr}m_H1m` : `trail_T10m_H2m`;
+  const win = (mode==='tdt') ? 7 : 5; // окно сглаживания в точках
+  const fname = `${base}__expected_${methodTag}_step10m_win${win}pts_manifest.json`;
+  $dl.download = fname;
+  $dl.style.display="inline-block";
+  $dl.textContent = "Скачать: " + fname;
+});
+</script>
+</body>
+</html>
+
+<style>#fileBtn{line-height:1;}</style>
